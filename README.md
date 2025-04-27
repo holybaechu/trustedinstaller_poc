@@ -2,7 +2,7 @@
 A Proof of Concept of opening any program (in this case, CMD) as TrustedInstaller in Rust using `windows` and `windows-service` crates.
 
 ## Usage
-1. Download the latest release from the [latest release](https://github.com/holybaechu/trustedinstaller_poc/releases/tag/release) or build it yourself. Then, run the executable.
+1. Download the latest release from the [latest release](https://github.com/holybaechu/trustedinstaller_poc/releases/latest) or build it yourself. Then, run the executable.
 2. The program will open a UAC prompt if you are not running as Administrator. Accept the prompt.
 3. The program will then open CMD as TrustedInstaller.
 
