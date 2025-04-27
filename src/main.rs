@@ -227,38 +227,31 @@ fn main() {
         }
     };
 
-    match service.query_status() {
-        Ok(status) => {
-            if status.current_state != ServiceState::Running {
-                println!("TrustedInstaller service is not running, attempting to start...");
-                if let Err(e) = service.start(&[] as &[&str]) {
-                    eprintln!("Failed to start TrustedInstaller service: {}", e);
-                }
-                // Wait for a short period to ensure the service is fully started
-                std::thread::sleep(std::time::Duration::from_secs(1));
-
-                if service.query_status().map_or(true, |s| s.current_state != ServiceState::Running) {
-                    eprintln!("TrustedInstaller service failed to reach running state.");
-                    return;
-                } else {
-                    println!("TrustedInstaller service started.");
-                    
-                }
-            } else {
-                println!("TrustedInstaller service is already running.");
-            }
-        }
+    let service_status = match service.query_status() {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to query TrustedInstaller service status: {}", e);
-        }
-    }
-
-    let ti_pid = match get_trusted_installer_pid() {
-        Some(pid) => pid,
-        None => {
-            eprintln!("Failed to find TrustedInstaller PID. Is the service running?");
             return;
         }
+    };
+
+    if service_status.current_state != ServiceState::Running {
+        println!("TrustedInstaller service is not running, attempting to start...");
+        if let Err(e) = service.start(&[] as &[&str]) {
+            eprintln!("Failed to start TrustedInstaller service: {}", e);
+        }
+    } else {
+        println!("TrustedInstaller service is already running.");
+    }
+
+    println!("Waiting for TrustedInstaller PID...");
+    let start = std::time::Instant::now();
+    let ti_pid: u32 = loop {
+        if start.elapsed().as_secs() > 10 {
+            eprintln!("Timed out waiting for TrustedInstaller PID.");
+            return;
+        }
+        if let Some(pid) = get_trusted_installer_pid() { break pid; }
     };
     println!("Found TrustedInstaller PID: {}", ti_pid);
 
