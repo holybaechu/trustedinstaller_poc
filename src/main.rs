@@ -64,7 +64,7 @@ fn enable_se_debug_privilege() -> Result<(), Error> {
              eprintln!("AdjustTokenPrivileges reported success, but GetLastError is: {}", last_error);
         }
 
-        CloseHandle(token_handle)?; // Close handle
+        CloseHandle(token_handle)?;
     }
     Ok(())
 }
@@ -160,7 +160,12 @@ fn elevate() {
             .chain(once(0))
             .collect();
 
-        let args_wide: Vec<u16> = once(0).collect();
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let args_wide: Vec<u16> = OsStr::new(&args.join(" "))
+            .encode_wide()
+            .chain(once(0))
+            .collect();
+
         let current_dir = match std::env::current_dir() {
              Ok(path) => path,
              Err(e) => {
@@ -170,15 +175,15 @@ fn elevate() {
         };
         let current_dir_wide: Vec<u16> = OsStr::new(&current_dir)
             .encode_wide()
-            .chain(once(0)) // Null terminate
+            .chain(once(0))
             .collect();
 
         println!("Attempting elevation...");
         let result = ShellExecuteW(
-            Some(HWND::default()), // Use HWND(0) or HWND::default()
+            Some(HWND::default()),
             w!("runas"),
             PCWSTR::from_raw(exe_path_wide.as_ptr()),
-            PCWSTR::from_raw(args_wide.as_ptr()), // Pass empty args
+            PCWSTR::from_raw(args_wide.as_ptr()),
             PCWSTR::from_raw(current_dir_wide.as_ptr()),
             SW_NORMAL,
         );
@@ -257,11 +262,11 @@ fn main() {
 
     unsafe {
         let ti_handle = match OpenProcess(
-            PROCESS_CREATE_PROCESS | PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION, // Added QUERY_INFORMATION
+            PROCESS_CREATE_PROCESS | PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION,
             false,
             ti_pid,
         ) {
-            Ok(handle) if !handle.is_invalid() => handle, // Check if handle is valid
+            Ok(handle) if !handle.is_invalid() => handle,
             Ok(_) => {
                  eprintln!("OpenProcess succeeded but returned an invalid handle for PID: {}. Last error: {}", ti_pid, Error::from_win32());
                  return;
@@ -320,15 +325,18 @@ fn main() {
              return;
         }
         println!("Attribute list updated with parent process.");
-
-        let mut cmd_line: Vec<u16> = OsStr::new("cmd.exe")
+       
+        let mut command_line: String = "cmd".to_string();
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if !args.is_empty() { command_line = args.join(" "); }
+        let mut command_line_wide: Vec<u16> = OsStr::new(&command_line)
             .encode_wide()
             .chain(once(0))
             .collect();
 
         if CreateProcessW(
             None, 
-            Some(PWSTR(cmd_line.as_mut_ptr())),
+            Some(PWSTR(command_line_wide.as_mut_ptr())),
             None,
             None,
             false,
