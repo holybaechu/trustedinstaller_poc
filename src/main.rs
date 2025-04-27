@@ -362,7 +362,7 @@ fn main() {
         println!("Cleaned up attribute list and parent process handle.");
     }
 
-    println!("Press Enter to exit...");
-    let mut input = String::new();
-    let _ = std::io::stdin().read_line(&mut input);
+    // println!("Press Enter to exit...");
+    // let mut input = String::new();
+    // let _ = std::io::stdin().read_line(&mut input);
 }
