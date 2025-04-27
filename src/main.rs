@@ -328,7 +328,7 @@ fn main() {
         }
         println!("Attribute list updated with parent process.");
 
-        let mut cmd_line: Vec<u16> = OsStr::new("cmd.exe /c start cmd.exe")
+        let mut cmd_line: Vec<u16> = OsStr::new("cmd.exe")
             .encode_wide()
             .chain(once(0))
             .collect();
