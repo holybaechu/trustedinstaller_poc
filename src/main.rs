@@ -1,6 +1,6 @@
-use std::{ffi::{c_void, OsStr}, iter::once, os::windows::ffi::OsStrExt};
+use std::ffi::c_void;
 use windows::{
-    core::{w, Error, PCWSTR, PWSTR},
+    core::{w, Error, HSTRING, PCWSTR, PWSTR},
     Win32::{
         Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, HWND, LUID},
         Security::{
@@ -27,6 +27,16 @@ use windows_service::{
     service::{ServiceAccess, ServiceState},
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
+
+fn str_to_pwstr(s: &str) -> PWSTR {
+    let mut wide: Vec<u16> = s.encode_utf16().collect();
+    wide.push(0);
+    PWSTR(wide.as_mut_ptr())
+}
+
+fn str_to_pcwstr(s: &str) -> PCWSTR {
+    PCWSTR(HSTRING::from(s).as_ptr())
+}
 
 fn enable_se_debug_privilege() -> Result<(), Error> {
     unsafe {
@@ -155,17 +165,7 @@ fn elevate() {
                 std::process::exit(1);
             }
         };
-        let exe_path_wide: Vec<u16> = OsStr::new(&exe_path)
-            .encode_wide()
-            .chain(once(0))
-            .collect();
-
         let args: Vec<String> = std::env::args().skip(1).collect();
-        let args_wide: Vec<u16> = OsStr::new(&args.join(" "))
-            .encode_wide()
-            .chain(once(0))
-            .collect();
-
         let current_dir = match std::env::current_dir() {
              Ok(path) => path,
              Err(e) => {
@@ -173,18 +173,15 @@ fn elevate() {
                 std::process::exit(1);
              }
         };
-        let current_dir_wide: Vec<u16> = OsStr::new(&current_dir)
-            .encode_wide()
-            .chain(once(0))
-            .collect();
 
+        println!("{} {} {}", exe_path.to_str().unwrap(), args.join(" "), current_dir.to_str().unwrap());
         println!("Attempting elevation...");
         let result = ShellExecuteW(
             Some(HWND::default()),
             w!("runas"),
-            PCWSTR::from_raw(exe_path_wide.as_ptr()),
-            PCWSTR::from_raw(args_wide.as_ptr()),
-            PCWSTR::from_raw(current_dir_wide.as_ptr()),
+            str_to_pcwstr(exe_path.to_str().expect("Couldn't convert exe_path to &str")),
+            str_to_pcwstr(&args.join(" ")),
+            str_to_pcwstr(current_dir.to_str().expect("Couldn't convert current_dir to &str")),
             SW_NORMAL,
         );
 
@@ -329,14 +326,10 @@ fn main() {
         let mut command_line: String = "cmd".to_string();
         let args: Vec<String> = std::env::args().skip(1).collect();
         if !args.is_empty() { command_line = args.join(" "); }
-        let mut command_line_wide: Vec<u16> = OsStr::new(&command_line)
-            .encode_wide()
-            .chain(once(0))
-            .collect();
 
         if CreateProcessW(
             None, 
-            Some(PWSTR(command_line_wide.as_mut_ptr())),
+            Some(str_to_pwstr(&command_line)),
             None,
             None,
             false,
