@@ -1,0 +1,18 @@
+[package]
+name = "trustedinstaller_poc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+windows-service = "0.8.0"
+
+[dependencies.windows]
+version = "0.61.1" # Or the latest version
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
