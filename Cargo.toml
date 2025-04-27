@@ -1,13 +1,13 @@
 [package]
 name = "trustedinstaller_poc"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2024"
 
 [dependencies]
 windows-service = "0.8.0"
 
 [dependencies.windows]
-version = "0.61.1" # Or the latest version
+version = "0.61.1"
 features = [
     "Win32_Foundation",
     "Win32_Security",
