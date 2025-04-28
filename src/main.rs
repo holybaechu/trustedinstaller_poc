@@ -200,96 +200,22 @@ fn elevate() -> Result<(), ElevateError> {
     }
 }
 
-fn main() {
-    if !is_elevated().expect("Could not check if process is elevated") {
-        if let Err(e) = elevate() {
-            println!("Could not run a new process with elevated privileges: {}", e);
-            std::process::exit(1)
-        }
-        std::process::exit(0)
-    }
-
-    println!("Running with elevated privileges.");
-
-    if let Err(e) = enable_se_debug_privilege() {
-        eprintln!("Failed to enable SeDebugPrivilege: {}", e);
-        return;
-    } else {
-        println!("SeDebugPrivilege enabled successfully.");
-    }
-
-    // Connect to service manager
-    let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)  {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Failed to connect to Service Manager: {}", e);
-            return;
-        }
-    };
-
-    // Open TrustedInstaller service
-    let service = match manager.open_service("TrustedInstaller", ServiceAccess::QUERY_STATUS | ServiceAccess::START) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to open TrustedInstaller service: {}", e);
-            return;
-        }
-    };
-
-    // Query status of the service
-    let service_status = match service.query_status() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to query TrustedInstaller service status: {}", e);
-            return;
-        }
-    };
-
-    if service_status.current_state != ServiceState::Running {
-        println!("TrustedInstaller service is not running, attempting to start...");
-        if let Err(e) = service.start(&[] as &[&str]) {
-            eprintln!("Failed to start TrustedInstaller service: {}", e);
-            return;
-        }
-    } else {
-        println!("TrustedInstaller service is already running.");
-    }
-
-    // Loop until it finds the PID of TrustedInstaller
-    println!("Waiting for TrustedInstaller PID...");
-    let start = std::time::Instant::now();
-    let ti_pid: u32 = loop {
-        // Time out if it gets longer than 10 seconds
-        if start.elapsed().as_secs() > 10 {
-            eprintln!("Timed out waiting for TrustedInstaller PID.");
-            return;
-        }
-        if let Ok(pid) = get_trusted_installer_pid() { break pid; }
-    };
-    println!("Found TrustedInstaller PID: {}", ti_pid);
-
-    // PPID Spoofing
+fn create_ppid_spoofed_process(ppid: u32, cmd: String) -> Result<PROCESS_INFORMATION, windows::core::Error> {
     unsafe {
         // Open TrustedInstaller's process
         let ti_handle = match OpenProcess(
             PROCESS_CREATE_PROCESS | PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION,
             false,
-            ti_pid,
+            ppid,
         ) {
             Ok(handle) if !handle.is_invalid() => handle,
             Ok(_) => {
-                eprintln!("OpenProcess succeeded but returned an invalid handle for PID: {}. Last error: {}", ti_pid, windows::core::Error::from_win32());
-                return;
+                return Err(windows::core::Error::from_win32());
             }
             Err(e) => {
-                eprintln!(
-                    "Failed to open TrustedInstaller process (PID: {}): {}",
-                    ti_pid, e
-                );
-                return;
+                return Err(e);
             }
         };
-        println!("Successfully opened handle to TrustedInstaller process.");
 
         // Setup StartupInfo for setting PPID
         let mut si_ex: STARTUPINFOEXW = std::mem::zeroed();
@@ -300,9 +226,8 @@ fn main() {
         // Get size for attribute list
         let _ = InitializeProcThreadAttributeList(None, 1, Some(0), &mut attr_list_size);
         if attr_list_size == 0 {
-             eprintln!("Failed to get size for attribute list. Error: {}", windows::core::Error::from_win32());
-             let _ = CloseHandle(ti_handle);
-             return;
+            let _ = CloseHandle(ti_handle);
+            return Err(windows::core::Error::from_win32());
         }
 
         let mut attr_list_buffer = vec![0u8; attr_list_size];
@@ -315,11 +240,9 @@ fn main() {
             Some(0), 
             &mut attr_list_size
         ).is_err() {
-            eprintln!("Failed to initialize attribute list. Error: {}", windows::core::Error::from_win32());
             let _ = CloseHandle(ti_handle);
-            return;
+            return Err(windows::core::Error::from_win32());
         }
-        println!("Attribute list initialized.");
 
         // Update attribute list with parent process
         let parent_handle_ptr: *const c_void = &ti_handle as *const _ as *const c_void;
@@ -332,21 +255,15 @@ fn main() {
             None,
             None,
         ).is_err() {
-             eprintln!("Failed to update attribute list with parent process. Error: {}", windows::core::Error::from_win32());
-             DeleteProcThreadAttributeList(si_ex.lpAttributeList);
-             let _ = CloseHandle(ti_handle);
-             return;
+            DeleteProcThreadAttributeList(si_ex.lpAttributeList);
+            let _ = CloseHandle(ti_handle);
+            return Err(windows::core::Error::from_win32());
         }
-        println!("Attribute list updated with parent process.");
-       
-        let mut command_line: String = "cmd".to_string();
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        if !args.is_empty() { command_line = args.join(" "); }
 
         // Create new process with PPID spoofed
         if CreateProcessW(
             None, 
-            Some(str_to_pwstr(&command_line)),
+            Some(str_to_pwstr(&cmd)),
             None,
             None,
             false,
@@ -356,23 +273,102 @@ fn main() {
             &mut si_ex.StartupInfo,
             &mut pi,
         ).is_err() {
-            eprintln!("CreateProcessW failed! Error: {}", windows::core::Error::from_win32());
-            return;
+            return Err(windows::core::Error::from_win32());
         }
-
-        println!(
-            "CreateProcessW succeeded. New process PID: {}, TID: {}",
-            pi.dwProcessId, pi.dwThreadId
-        );
 
         let _ = CloseHandle(pi.hProcess);
         let _ = CloseHandle(pi.hThread);
-        println!("Child process handles closed.");
 
         DeleteProcThreadAttributeList(si_ex.lpAttributeList);
         let _ = CloseHandle(ti_handle);
-        println!("Cleaned up attribute list and parent process handle.");
+
+        return Ok(pi)
     }
+}
+
+#[derive(Debug)]
+enum RunAsTrustedInstallerError {
+    Win32Error(windows::core::Error),
+    ServiceManagerError(windows_service::Error),
+    TimedOut
+}
+
+impl fmt::Display for RunAsTrustedInstallerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Win32Error(e) => write!(f, "Error while calling Win32 API: {}", e),
+            Self::ServiceManagerError(e) => write!(f, "Error while accessing service manager: {}", e),
+            Self::TimedOut => write!(f, "Timed out while getting TrustedInstaller's PID")
+        }
+    }
+}
+
+fn run_as_trusted_installer(cmd: String) -> Result<PROCESS_INFORMATION, RunAsTrustedInstallerError> {
+    if let Err(e) = enable_se_debug_privilege() {
+        return Err(RunAsTrustedInstallerError::Win32Error(e))
+    }
+
+    // Connect to service manager
+    let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(RunAsTrustedInstallerError::ServiceManagerError(e));
+        }
+    };
+
+    // Open TrustedInstaller service
+    let service = match manager.open_service("TrustedInstaller", ServiceAccess::QUERY_STATUS | ServiceAccess::START) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(RunAsTrustedInstallerError::ServiceManagerError(e));
+        }
+    };
+
+    // Query status of the service
+    let service_status = match service.query_status() {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(RunAsTrustedInstallerError::ServiceManagerError(e));
+        }
+    };
+
+    if service_status.current_state != ServiceState::Running {
+        if let Err(e) = service.start(&[] as &[&str]) {
+            return Err(RunAsTrustedInstallerError::ServiceManagerError(e));
+        }
+    } else {
+    }
+
+    // Loop until it finds the PID of TrustedInstaller
+    let start = std::time::Instant::now();
+    let ti_pid: u32 = loop {
+        // Time out if it gets longer than 10 seconds
+        if start.elapsed().as_secs() > 10 {
+            return Err(RunAsTrustedInstallerError::TimedOut)
+        }
+        if let Ok(pid) = get_trusted_installer_pid() { break pid; }
+    };
+
+    match create_ppid_spoofed_process(ti_pid, cmd) {
+        Ok(pi) => return Ok(pi),
+        Err(e) => return Err(RunAsTrustedInstallerError::Win32Error(e))
+    }
+}
+
+fn main() {
+    if !is_elevated().expect("Could not check if process is elevated") {
+        if let Err(e) = elevate() {
+            println!("Could not run a new process with elevated privileges: {}", e);
+            std::process::exit(1)
+        }
+        std::process::exit(0)
+    }
+    println!("Running with elevated privileges.");
+
+    let mut command_line: String = "cmd".to_string();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() { command_line = args.join(" "); }
+    let _ = run_as_trusted_installer(command_line);
 
     // println!("Press Enter to exit...");
     // let mut input = String::new();
