@@ -213,6 +213,7 @@ fn main() {
 
     if let Err(e) = enable_se_debug_privilege() {
         eprintln!("Failed to enable SeDebugPrivilege: {}", e);
+        return;
     } else {
         println!("SeDebugPrivilege enabled successfully.");
     }
@@ -248,6 +249,7 @@ fn main() {
         println!("TrustedInstaller service is not running, attempting to start...");
         if let Err(e) = service.start(&[] as &[&str]) {
             eprintln!("Failed to start TrustedInstaller service: {}", e);
+            return;
         }
     } else {
         println!("TrustedInstaller service is already running.");
@@ -276,8 +278,8 @@ fn main() {
         ) {
             Ok(handle) if !handle.is_invalid() => handle,
             Ok(_) => {
-                 eprintln!("OpenProcess succeeded but returned an invalid handle for PID: {}. Last error: {}", ti_pid, windows::core::Error::from_win32());
-                 return;
+                eprintln!("OpenProcess succeeded but returned an invalid handle for PID: {}. Last error: {}", ti_pid, windows::core::Error::from_win32());
+                return;
             }
             Err(e) => {
                 eprintln!(
@@ -355,6 +357,7 @@ fn main() {
             &mut pi,
         ).is_err() {
             eprintln!("CreateProcessW failed! Error: {}", windows::core::Error::from_win32());
+            return;
         }
 
         println!(
