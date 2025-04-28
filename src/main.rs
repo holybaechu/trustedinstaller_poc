@@ -2,7 +2,7 @@ use std::ffi::c_void;
 use windows::{
     core::{w, Error, HSTRING, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, HWND, LUID},
+        Foundation::{CloseHandle, HANDLE, HWND, LUID},
         Security::{
             AdjustTokenPrivileges, GetTokenInformation, LookupPrivilegeValueW, TokenElevation, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY
         },
@@ -40,18 +40,19 @@ fn str_to_pcwstr(s: &str) -> PCWSTR {
 
 fn enable_se_debug_privilege() -> Result<(), Error> {
     unsafe {
+        // Retrieve current process's token
         let mut token_handle = HANDLE::default();
-
         OpenProcessToken(
             GetCurrentProcess(),
             TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
             &mut token_handle,
         )?;
 
+        // Retrieve LUID for SeDebugPrivilege
         let mut luid = LUID::default();
-
         LookupPrivilegeValueW(PCWSTR::null(), w!("SeDebugPrivilege"), &mut luid)?;
 
+        // Prepare privileges for enable SeDebugPrivilege for token
         let token_privileges = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
             Privileges: [LUID_AND_ATTRIBUTES {
@@ -60,18 +61,16 @@ fn enable_se_debug_privilege() -> Result<(), Error> {
             }],
         };
 
-        AdjustTokenPrivileges(
+        // Adjust token's privileges to enable SeDebugPrivilege
+        if let Err(e) = AdjustTokenPrivileges(
             token_handle,
             false,
             Some(&token_privileges),
             std::mem::size_of::<TOKEN_PRIVILEGES>() as u32,
             None,
             None,
-        )?;
-
-        let last_error = Error::from_win32();
-        if last_error.code() != ERROR_SUCCESS.to_hresult() {
-             eprintln!("AdjustTokenPrivileges reported success, but GetLastError is: {}", last_error);
+        ) {
+            return Err(e)
         }
 
         CloseHandle(token_handle)?;
@@ -86,6 +85,7 @@ fn parse_process_name(exe_file: &[u16]) -> String {
 
 fn get_trusted_installer_pid() -> Option<u32> {
     unsafe {
+        // Create a snapshot of currently running processes
         let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
            Ok(handle) => handle,
            Err(e) => {
@@ -97,12 +97,14 @@ fn get_trusted_installer_pid() -> Option<u32> {
         let mut proc_entry = PROCESSENTRY32W::default();
         proc_entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
+        // Get first process
         if Process32FirstW(snapshot, &mut proc_entry).is_err() {
             eprintln!("Failed to get first process: {}", Error::from_win32());
             let _ = CloseHandle(snapshot);
             return None;
         }
 
+        // Loop until if it finds a TrustedInstaller.exe process
         loop {
             if parse_process_name(&proc_entry.szExeFile).eq_ignore_ascii_case("TrustedInstaller.exe") {
                 let _ = CloseHandle(snapshot);
@@ -121,6 +123,7 @@ fn get_trusted_installer_pid() -> Option<u32> {
 
 fn is_elevated() -> bool {
     unsafe {
+        // Retrieve current process's token
         let mut token_handle = HANDLE::default();
         if OpenProcessToken(
             GetCurrentProcess(),
@@ -136,6 +139,7 @@ fn is_elevated() -> bool {
         let mut token_elevation: TOKEN_ELEVATION = core::mem::zeroed();
         let mut return_length = 0;
 
+        // Retrieve elevation token
         let result = GetTokenInformation(
             token_handle,
             TokenElevation,
@@ -146,6 +150,7 @@ fn is_elevated() -> bool {
 
         let _ = CloseHandle(token_handle);
 
+        // Return result
         match result {
             Ok(_) => token_elevation.TokenIsElevated != 0,
             Err(e) => {
@@ -158,6 +163,7 @@ fn is_elevated() -> bool {
 
 fn elevate() {
     unsafe {
+        // Get current process's launching options
         let exe_path = match std::env::current_exe() {
             Ok(path) => path,
             Err(e) => {
@@ -174,8 +180,7 @@ fn elevate() {
              }
         };
 
-        println!("{} {} {}", exe_path.to_str().unwrap(), args.join(" "), current_dir.to_str().unwrap());
-        println!("Attempting elevation...");
+        // Run a new process using `runas` command
         let result = ShellExecuteW(
             Some(HWND::default()),
             w!("runas"),
@@ -185,8 +190,8 @@ fn elevate() {
             SW_NORMAL,
         );
 
+        // Exit current process
         if (result.0 as isize) > 32 {
-            println!("Elevation successful. Exiting current instance.");
             std::process::exit(0);
         } else {
             eprintln!(
@@ -213,6 +218,7 @@ fn main() {
         println!("SeDebugPrivilege enabled successfully.");
     }
 
+    // Connect to service manager
     let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)  {
         Ok(m) => m,
         Err(e) => {
@@ -221,6 +227,7 @@ fn main() {
         }
     };
 
+    // Open TrustedInstaller service
     let service = match manager.open_service("TrustedInstaller", ServiceAccess::QUERY_STATUS | ServiceAccess::START) {
         Ok(s) => s,
         Err(e) => {
@@ -229,6 +236,7 @@ fn main() {
         }
     };
 
+    // Query status of the service
     let service_status = match service.query_status() {
         Ok(s) => s,
         Err(e) => {
@@ -246,9 +254,11 @@ fn main() {
         println!("TrustedInstaller service is already running.");
     }
 
+    // Loop until it finds the PID of TrustedInstaller
     println!("Waiting for TrustedInstaller PID...");
     let start = std::time::Instant::now();
     let ti_pid: u32 = loop {
+        // Time out if it gets longer than 10 seconds
         if start.elapsed().as_secs() > 10 {
             eprintln!("Timed out waiting for TrustedInstaller PID.");
             return;
@@ -257,7 +267,9 @@ fn main() {
     };
     println!("Found TrustedInstaller PID: {}", ti_pid);
 
+    // PPID Spoofing
     unsafe {
+        // Open TrustedInstaller's process
         let ti_handle = match OpenProcess(
             PROCESS_CREATE_PROCESS | PROCESS_DUP_HANDLE | PROCESS_QUERY_INFORMATION,
             false,
@@ -278,11 +290,13 @@ fn main() {
         };
         println!("Successfully opened handle to TrustedInstaller process.");
 
+        // Setup StartupInfo for setting PPID
         let mut si_ex: STARTUPINFOEXW = std::mem::zeroed();
         si_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
         let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
         let mut attr_list_size: usize = 0;
 
+        // Get size for attribute list
         let _ = InitializeProcThreadAttributeList(None, 1, Some(0), &mut attr_list_size);
         if attr_list_size == 0 {
              eprintln!("Failed to get size for attribute list. Error: {}", Error::from_win32());
@@ -293,6 +307,7 @@ fn main() {
         let mut attr_list_buffer = vec![0u8; attr_list_size];
         si_ex.lpAttributeList = LPPROC_THREAD_ATTRIBUTE_LIST(attr_list_buffer.as_mut_ptr() as *mut c_void);
 
+        // Initalize attribute list
         if InitializeProcThreadAttributeList(
             Some(si_ex.lpAttributeList), 
             1, 
@@ -305,7 +320,7 @@ fn main() {
         }
         println!("Attribute list initialized.");
 
-
+        // Update attribute list with parent process
         let parent_handle_ptr: *const c_void = &ti_handle as *const _ as *const c_void;
         if UpdateProcThreadAttribute(
             si_ex.lpAttributeList,
@@ -327,6 +342,7 @@ fn main() {
         let args: Vec<String> = std::env::args().skip(1).collect();
         if !args.is_empty() { command_line = args.join(" "); }
 
+        // Create new process with PPID spoofed
         if CreateProcessW(
             None, 
             Some(str_to_pwstr(&command_line)),
