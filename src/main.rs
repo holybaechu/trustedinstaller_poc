@@ -35,10 +35,6 @@ fn str_to_pwstr(s: &str) -> PWSTR {
     PWSTR(wide.as_mut_ptr())
 }
 
-fn str_to_pcwstr(s: &str) -> PCWSTR {
-    PCWSTR(HSTRING::from(s).as_ptr())
-}
-
 fn enable_se_debug_privilege() -> Result<(), windows::core::Error> {
     unsafe {
         // Retrieve current process's token
@@ -189,9 +185,9 @@ fn elevate() -> Result<(), ElevateError> {
         let result = ShellExecuteW(
             Some(HWND::default()),
             w!("runas"),
-            str_to_pcwstr(exe_path.to_str().expect("Couldn't convert exe_path to &str")),
-            str_to_pcwstr(&args.join(" ")),
-            str_to_pcwstr(current_dir.to_str().expect("Couldn't convert current_dir to &str")),
+            &HSTRING::from(exe_path.as_path()),
+            &HSTRING::from(&args.join(" ")),
+            &HSTRING::from(current_dir.as_path()),
             SW_NORMAL,
         );
 
