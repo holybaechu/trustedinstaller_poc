@@ -1,6 +1,7 @@
+use core::fmt;
 use std::ffi::c_void;
 use windows::{
-    core::{w, Error, HSTRING, PCWSTR, PWSTR},
+    core::{w, HSTRING, PCWSTR, PWSTR},
     Win32::{
         Foundation::{CloseHandle, HANDLE, HWND, LUID},
         Security::{
@@ -38,7 +39,7 @@ fn str_to_pcwstr(s: &str) -> PCWSTR {
     PCWSTR(HSTRING::from(s).as_ptr())
 }
 
-fn enable_se_debug_privilege() -> Result<(), Error> {
+fn enable_se_debug_privilege() -> Result<(), windows::core::Error> {
     unsafe {
         // Retrieve current process's token
         let mut token_handle = HANDLE::default();
@@ -62,16 +63,14 @@ fn enable_se_debug_privilege() -> Result<(), Error> {
         };
 
         // Adjust token's privileges to enable SeDebugPrivilege
-        if let Err(e) = AdjustTokenPrivileges(
+        AdjustTokenPrivileges(
             token_handle,
             false,
             Some(&token_privileges),
             std::mem::size_of::<TOKEN_PRIVILEGES>() as u32,
             None,
             None,
-        ) {
-            return Err(e)
-        }
+        )?;
 
         CloseHandle(token_handle)?;
     }
@@ -83,14 +82,13 @@ fn parse_process_name(exe_file: &[u16]) -> String {
     String::from_utf16_lossy(&exe_file[..null_pos])
 }
 
-fn get_trusted_installer_pid() -> Option<u32> {
+fn get_trusted_installer_pid() -> Result<u32, windows::core::Error> {
     unsafe {
         // Create a snapshot of currently running processes
         let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
            Ok(handle) => handle,
            Err(e) => {
-               eprintln!("Failed to create toolhelp snapshot: {}", e);
-               return None;
+               return Err(e)
            }
         };
 
@@ -99,29 +97,25 @@ fn get_trusted_installer_pid() -> Option<u32> {
 
         // Get first process
         if Process32FirstW(snapshot, &mut proc_entry).is_err() {
-            eprintln!("Failed to get first process: {}", Error::from_win32());
             let _ = CloseHandle(snapshot);
-            return None;
+            return Err(windows::core::Error::from_win32())
         }
 
         // Loop until if it finds a TrustedInstaller.exe process
         loop {
             if parse_process_name(&proc_entry.szExeFile).eq_ignore_ascii_case("TrustedInstaller.exe") {
                 let _ = CloseHandle(snapshot);
-                return Some(proc_entry.th32ProcessID);
+                return Ok(proc_entry.th32ProcessID);
             }
             if Process32NextW(snapshot, &mut proc_entry).is_err() {
-                if Error::from_win32().code() != windows::Win32::Foundation::ERROR_NO_MORE_FILES.to_hresult() {
-                    eprintln!("Failed to get next process: {}", Error::from_win32());
-                }
                 let _ = CloseHandle(snapshot);
-                return None;
+                return Err(windows::core::Error::from_win32());
             }
         }
     }
 }
 
-fn is_elevated() -> bool {
+fn is_elevated() -> Result<bool, windows::core::Error> {
     unsafe {
         // Retrieve current process's token
         let mut token_handle = HANDLE::default();
@@ -129,11 +123,8 @@ fn is_elevated() -> bool {
             GetCurrentProcess(),
             TOKEN_QUERY,
             &mut token_handle,
-        )
-        .is_err()
-        {
-            eprintln!("is_elevated: Failed to open process token: {}", Error::from_win32());
-            return false;
+        ).is_err() {
+            return Err(windows::core::Error::from_win32());
         }
 
         let mut token_elevation: TOKEN_ELEVATION = core::mem::zeroed();
@@ -152,31 +143,45 @@ fn is_elevated() -> bool {
 
         // Return result
         match result {
-            Ok(_) => token_elevation.TokenIsElevated != 0,
+            Ok(_) => Ok(token_elevation.TokenIsElevated != 0),
             Err(e) => {
-                eprintln!("is_elevated: Failed to get token information: {}", e);
-                false
+                Err(e)
             }
         }
     }
 }
 
-fn elevate() {
+#[derive(Debug)]
+enum ElevateError {
+    CurrentExe(std::io::Error),
+    CurrentDir(std::io::Error),
+    Execute(windows::core::Error)
+}
+
+impl fmt::Display for ElevateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CurrentExe(e) => write!(f, "Could not query current executable's path: {}", e),
+            Self::CurrentDir(e) => write!(f, "Could not query current executable's running directory: {}", e),
+            ElevateError::Execute(e) => write!(f, "ShellExecuteW failed to elevate process: {}", e)
+        }
+    }
+}
+
+fn elevate() -> Result<(), ElevateError> {
     unsafe {
         // Get current process's launching options
         let exe_path = match std::env::current_exe() {
             Ok(path) => path,
             Err(e) => {
-                eprintln!("Failed to get current executable path: {}", e);
-                std::process::exit(1);
+                return Err(ElevateError::CurrentExe(e));
             }
         };
         let args: Vec<String> = std::env::args().skip(1).collect();
         let current_dir = match std::env::current_dir() {
              Ok(path) => path,
              Err(e) => {
-                eprintln!("Failed to get current directory: {}. Exiting.", e);
-                std::process::exit(1);
+                return Err(ElevateError::CurrentDir(e))
              }
         };
 
@@ -194,22 +199,20 @@ fn elevate() {
         if (result.0 as isize) > 32 {
             std::process::exit(0);
         } else {
-            eprintln!(
-                "ShellExecuteW failed to elevate process. Error: {}",
-                Error::from_win32()
-            );
-            std::process::exit(1);
+            return Err(ElevateError::Execute(windows::core::Error::from_win32()));
         }
     }
 }
 
 fn main() {
-    if !is_elevated() {
-        elevate();
-
-        eprintln!("Elevation failed or was cancelled.");
-        return; 
+    if !is_elevated().expect("Could not check if process is elevated") {
+        if let Err(e) = elevate() {
+            println!("Could not run a new process with elevated privileges: {}", e);
+            std::process::exit(1)
+        }
+        std::process::exit(0)
     }
+
     println!("Running with elevated privileges.");
 
     if let Err(e) = enable_se_debug_privilege() {
@@ -263,7 +266,7 @@ fn main() {
             eprintln!("Timed out waiting for TrustedInstaller PID.");
             return;
         }
-        if let Some(pid) = get_trusted_installer_pid() { break pid; }
+        if let Ok(pid) = get_trusted_installer_pid() { break pid; }
     };
     println!("Found TrustedInstaller PID: {}", ti_pid);
 
@@ -277,7 +280,7 @@ fn main() {
         ) {
             Ok(handle) if !handle.is_invalid() => handle,
             Ok(_) => {
-                 eprintln!("OpenProcess succeeded but returned an invalid handle for PID: {}. Last error: {}", ti_pid, Error::from_win32());
+                 eprintln!("OpenProcess succeeded but returned an invalid handle for PID: {}. Last error: {}", ti_pid, windows::core::Error::from_win32());
                  return;
             }
             Err(e) => {
@@ -299,7 +302,7 @@ fn main() {
         // Get size for attribute list
         let _ = InitializeProcThreadAttributeList(None, 1, Some(0), &mut attr_list_size);
         if attr_list_size == 0 {
-             eprintln!("Failed to get size for attribute list. Error: {}", Error::from_win32());
+             eprintln!("Failed to get size for attribute list. Error: {}", windows::core::Error::from_win32());
              let _ = CloseHandle(ti_handle);
              return;
         }
@@ -314,7 +317,7 @@ fn main() {
             Some(0), 
             &mut attr_list_size
         ).is_err() {
-            eprintln!("Failed to initialize attribute list. Error: {}", Error::from_win32());
+            eprintln!("Failed to initialize attribute list. Error: {}", windows::core::Error::from_win32());
             let _ = CloseHandle(ti_handle);
             return;
         }
@@ -331,7 +334,7 @@ fn main() {
             None,
             None,
         ).is_err() {
-             eprintln!("Failed to update attribute list with parent process. Error: {}", Error::from_win32());
+             eprintln!("Failed to update attribute list with parent process. Error: {}", windows::core::Error::from_win32());
              DeleteProcThreadAttributeList(si_ex.lpAttributeList);
              let _ = CloseHandle(ti_handle);
              return;
@@ -355,7 +358,7 @@ fn main() {
             &mut si_ex.StartupInfo,
             &mut pi,
         ).is_err() {
-            eprintln!("CreateProcessW failed! Error: {}", Error::from_win32());
+            eprintln!("CreateProcessW failed! Error: {}", windows::core::Error::from_win32());
         }
 
         println!(
